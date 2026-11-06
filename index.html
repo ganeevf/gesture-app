@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Жест-Коммуникатор (Офлайн)</title>
+  <!-- Локальные библиотеки MediaPipe для работы без интернета -->
+ <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #121212;
+      color: #ffffff;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+    header {
+      padding: 10px 15px;
+      background: #1f1f1f;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid #333;
+    }
+    .status { font-size: 13px; color: #aaa; }
+    .video-wrap {
+      position: relative;
+      flex: 1;
+      background: #000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      overflow: hidden;
+    }
+    video { display: none; }
+    canvas {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1);
+    }
+    .gesture-badge {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      background: rgba(0, 0, 0, 0.75);
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-size: 18px;
+      font-weight: bold;
+      color: #00e676;
+      border: 1px solid #00e676;
+    }
+    .progress-bar {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      height: 6px;
+      background: #00e676;
+      width: 0%;
+      transition: width 0.1s linear;
+    }
+    .panel {
+      background: #1e1e1e;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      border-top: 1px solid #333;
+    }
+    .text-box {
+      background: #2a2a2a;
+      padding: 12px;
+      border-radius: 8px;
+      min-height: 64px;
+      font-size: 22px;
+      font-weight: 600;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      word-break: break-word;
+    }
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    button {
+      padding: 12px;
+      border: none;
+      border-radius: 8px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      color: #fff;
+      background: #383838;
+    }
+    button:active { opacity: 0.8; }
+    .btn-cam { background: #2979ff; }
+    .btn-voice { background: #00c853; }
+    .btn-train { background: #ff9100; }
+    .btn-clear { background: #d50000; padding: 8px 12px; font-size: 14px; margin-left: 8px; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <strong>Жест-Коммуникатор (Offline)</strong>
+    <span class="status" id="statusText">Камера выключена</span>
+  </header>
+
+  <div class="video-wrap">
+    <video id="videoInput" autoplay muted playsinline></video>
+Verification
+    <canvas id="canvasOutput"></canvas>
+    <div class="gesture-badge" id="currentGesture">Ожидание жеста...</div>
+    <div class="progress-bar" id="holdBar"></div>
+  </div>
+
+  <div class="panel">
+    <div class="text-box">
+      <span id="outputText">Текст появится здесь...</span>
+      <button class="btn-clear" onclick="clearText()">✕</button>
+    </div>
+
+    <div class="controls">
+      <button class="btn-cam" id="camBtn" onclick="toggleCamera()">📷 Включить камеру</button>
+      <button class="btn-voice" id="voiceBtn" onclick="listenSpeech()">🎤 Сказать голосом</button>
+      <button class="btn-train" onclick="saveCustomGesture()">➕ Запомнить жест</button>
+      <button onclick="speakCurrentText()">🔊 Озвучить фразы</button>
+    </div>
+  </div>
+
+<script>
+  const videoElement = document.getElementById('videoInput');
+  const canvasElement = document.getElementById('canvasOutput');
+  const canvasCtx = canvasElement.getContext('2d');
+  const currentGestureEl = document.getElementById('currentGesture');
+  const outputTextEl = document.getElementById('outputText');
+  const statusText = document.getElementById('statusText');
+  const holdBar = document.getElementById('holdBar');
+  const camBtn = document.getElementById('camBtn');
+
+  let camera = null;
+  let isCameraRunning = false;
+  let useFrontCamera = true;
+  let lastLandmarks = null;
+  let accumulatedText = "";
+
+  let lastDetected = "";
+  let holdCounter = 0;
+  const HOLD_THRESHOLD = 18; // ~0.7 сек удержания жеста
+
+  let customGestures = JSON.parse(localStorage.getItem('savedGestures') || '{}');
+
+  function clearText() {
+    accumulatedText = "";
+    outputTextEl.innerText = "Текст появится здесь...";
+  }
+
+  function addWordToScreen(word) {
+    accumulatedText = accumulatedText ? accumulatedText + " " + word : word;
+    outputTextEl.innerText = accumulatedText;
+    speakText(word);
+  }
+
+  function speakText(text) {
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+      const msg = new SpeechSynthesisUtterance(text);
+      msg.lang = 'ru-RU';
+      window.speechSynthesis.speak(msg);
+    }
+  }
+
+  function speakCurrentText() {
+    if (accumulatedText) speakText(accumulatedText);
+  }
+
+  function getFeatureVector(lm) {
+    const wrist = lm[0];
+    const scale = Math.hypot(lm[9].x - wrist.x, lm[9].y - wrist.y) || 1;
+    const vec = [];
+    [4, 8, 12, 16, 20].forEach(i => {
+      vec.push((lm[i].x - wrist.x) / scale);
+      vec.push((lm[i].y - wrist.y) / scale);
+    });
+    return vec;
+  }
+
+  function saveCustomGesture() {
+    if (!lastLandmarks) {
+      alert("Сначала покажите руку в камеру!");
+      return;
+    }
+    const word = prompt("Введите слово или букву для текущего положения руки:");
+    if (word && word.trim() !== "") {
+      customGestures[word.trim()] = getFeatureVector(lastLandmarks);
+      localStorage.setItem('savedGestures', JSON.stringify(customGestures));
+      alert("Жест «" + word.trim() + "» сохранён в память телефона!");
+    }
+  }
+
+  function classifyGesture(lm) {
+    const currentVec = getFeatureVector(lm);
+    for (const [name, savedVec] of Object.entries(customGestures)) {
+      let dist = 0;
+      for (let i = 0; i < currentVec.length; i++) {
+        dist += Math.pow(currentVec[i] - savedVec[i], 2);
+      }
+      if (Math.sqrt(dist) < 0.45) return name;
+    }
+
+    const indexUp = lm[8].y < lm[6].y;
+    const middleUp = lm[12].y < lm[10].y;
+    const ringUp = lm[16].y < lm[14].y;
+    const pinkyUp = lm[20].y < lm[18].y;
+
+    const thumbUp = lm[4].y < lm[3].y && lm[4].y < lm[5].y;
+    const thumbDown = lm[4].y > lm[3].y && lm[4].y > lm[0].y;
+    const okPinch = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y) < 0.06;
+
+    if (okPinch && middleUp && ringUp) return "Спасибо / ОК";
+    if (indexUp && middleUp && ringUp && pinkyUp) return "Привет";
+    if (!indexUp && !middleUp && !ringUp && !pinkyUp && thumbUp) return "Да";
+    if (!indexUp && !middleUp && !ringUp && !pinkyUp && thumbDown) return "Нет";
+    if (indexUp && !middleUp && !ringUp && !pinkyUp) return "Подождите";
+    if (indexUp && middleUp && !ringUp && !pinkyUp) return "Мир / Два";
+    if (indexUp && !middleUp && !ringUp && pinkyUp) return "Я тебя люблю";
+    if (!indexUp && !middleUp && !ringUp && !pinkyUp) return "Помогите";
+
+    return "";
+  }
+
+  function onResults(results) {
+    canvasElement.width = results.image.width;
+    canvasElement.height = results.image.height;
+    canvasCtx.save();
+    canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+    canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+      const lm = results.multiHandLandmarks[0];
+      lastLandmarks = lm;
+
+      drawConnectors(canvasCtx, lm, HAND_CONNECTIONS, {color: '#00e676', lineWidth: 3});
+      drawLandmarks(canvasCtx, lm, {color: '#ff1744', lineWidth: 1, radius: 4});
+
+      const gesture = classifyGesture(lm);
+      if (gesture) {
+        currentGestureEl.innerText = "Жест: " + gesture;
+        if (gesture === lastDetected) {
+          holdCounter++;
+          holdBar.style.width = Math.min(100, (holdCounter / HOLD_THRESHOLD) * 100) + "%";
+          if (holdCounter === HOLD_THRESHOLD) {
+            addWordToScreen(gesture);
+            holdBar.style.width = "0%";
+          }
+        } else {
+          lastDetected = gesture;
+          holdCounter = 0;
+          holdBar.style.width = "0%";
+        }
+      } else {
+        currentGestureEl.innerText = "Рука в кадре...";
+        holdCounter = 0;
+        holdBar.style.width = "0%";
+      }
+    } else {
+      lastLandmarks = null;
+      currentGestureEl.innerText = "Ожидание жеста...";
+      holdCounter = 0;
+      holdBar.style.width = "0%";
+    }
+    canvasCtx.restore();
+  }
+
+  // Офлайн инициализация нейросети (файлы модели берутся из папки lib)
+const hands = new Hands({
+  locateFile: (file) => `lib/${file}`
+});
+  hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.6,
+    minTrackingConfidence: 0.6
+  });
+  hands.onResults(onResults);
+
+  async function toggleCamera() {
+    try {
+      statusText.innerText = "Запуск камеры...";
+      if (isCameraRunning) {
+        useFrontCamera = !useFrontCamera;
+        if (videoElement.srcObject) {
+          videoElement.srcObject.getTracks().forEach(t => t.stop());
+        }
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: useFrontCamera ? "user" : "environment", width: 640, height: 480 }
+      });
+      videoElement.srcObject = stream;
+      await videoElement.play();
+      isCameraRunning = true;
+      canvasElement.style.transform = useFrontCamera ? "scaleX(-1)" : "scaleX(1)";
+      camBtn.innerText = "🔄 Смена камеры";
+      statusText.innerText = "Работает офлайн";
+
+      async function frameLoop() {
+        if (isCameraRunning && videoElement.readyState >= 2) {
+          await hands.send({image: videoElement});
+        }
+        if (isCameraRunning) requestAnimationFrame(frameLoop);
+      }
+      frameLoop();
+    } catch (err) {
+      statusText.innerText = "Ошибка камеры";
+      alert("Не удалось включить камеру. Проверьте разрешения в настройках телефона.");
+    }
+  }
+
+  // Офлайн-распознавание речи (требует предварительно скачанного пакета языка в Android)
+  function listenSpeech() {
+    const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRec) {
+      const manual = prompt("Голосовой ввод недоступен без интернета. Введите текст вручную:");
+      if (manual) outputTextEl.innerText = "🗣️ " + manual;
+      return;
+    }
+    const rec = new SpeechRec();
+    rec.lang = 'ru-RU';
+    statusText.innerText = "Слушаю голос...";
+    rec.onresult = (e) => {
+      const text = e.results[0][0].transcript;
+      accumulatedText = "🗣️ " + text;
+      outputTextEl.innerText = accumulatedText;
+      statusText.innerText = "Готово";
+    };
+    rec.onerror = () => { 
+      statusText.innerText = "Ошибка (нужен оффлайн-пакет речи)"; 
+      const manual = prompt("Голосовой поиск без сети не ответил. Напишите текст сами:");
+      if (manual) outputTextEl.innerText = "🗣️ " + manual;
+    };
+    rec.start();
+  }
+</script>
+</body>
+</html>
